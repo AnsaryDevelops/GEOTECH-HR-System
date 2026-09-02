@@ -28,6 +28,7 @@ import {
   empName,
   DEPARTMENTS,
   DEFAULT_LEAVE_TYPES,
+  calculateWorkingLeaveDays,
 } from "../lib/store";
 import type {
   RequestRecord,
@@ -1514,6 +1515,7 @@ interface CreateEmployeeInput {
   firstName: string; lastName: string; email: string; phone?: string;
   position: string; department: string; role: UserRole;
   managerId: string | null; status: "ACTIVE" | "INACTIVE"; password: string;
+  annualLeaveAllocation?: number;
 }
 
 interface StoreContextValue {
@@ -1660,6 +1662,7 @@ function StoreProvider({ children }: { children?: React.ReactNode }) {
       email: data.email.trim().toLowerCase(),
       phone: data.phone?.trim() || undefined,
       status: data.status, managerId: data.managerId || null, role: data.role,
+      annualLeaveAllocation: data.annualLeaveAllocation,
     };
     createHRUserCredential({ employeeNumber: id, name, role: data.role, password: data.password });
     mutate((p) => ({ ...p, employees: [...p.employees, employee], nextEmpSeq: p.nextEmpSeq + 1 }));
@@ -2156,6 +2159,14 @@ function LeaveRequestPage() {
   const [errors, setErrors] = useState<Record<string, string>>({});
   const [submitting, setSubmitting] = useState(false);
 
+  const employee = employees.find((e) => e.id === session!.user.id) ?? null;
+  const allocation = employee?.annualLeaveAllocation ?? 0;
+  const requestedDays = calculateWorkingLeaveDays(startDate, endDate);
+  const approvedDaysUsed = requests
+    .filter((r) => r.employeeId === session!.user.id && r.status === "APPROVED" && r.type === "LEAVE")
+    .reduce((sum, request) => sum + calculateWorkingLeaveDays(request.startDate ?? "", request.endDate ?? ""), 0);
+  const remainingDays = Math.max(0, allocation - approvedDaysUsed);
+
   function clearErr(field: string) {
     setErrors((p) => { const n = { ...p }; delete n[field]; return n; });
   }
@@ -2222,6 +2233,19 @@ function LeaveRequestPage() {
           )}
           <form onSubmit={handleSubmit} noValidate>
             <div className="flex flex-col gap-5">
+              <div className="rounded-[10px] border border-border bg-muted/20 px-4 py-3">
+                <div className="text-sm font-medium text-foreground mb-2">Leave Balance</div>
+                <div className="grid grid-cols-2 gap-3 text-sm">
+                  <div className="border-r border-border pr-3">
+                    <div className="text-2xl font-semibold text-foreground">{remainingDays} Days</div>
+                    <div className="text-muted-foreground">remaining of {allocation} days allocated</div>
+                  </div>
+                  <div className="pl-3 text-right">
+                    <div className="text-2xl font-semibold text-foreground">{requestedDays} Day{requestedDays === 1 ? "" : "s"}</div>
+                    <div className="text-muted-foreground">on leave requested</div>
+                  </div>
+                </div>
+              </div>
               <Select
                 label="Leave Type *"
                 value={leaveType}
@@ -3603,6 +3627,7 @@ interface EmployeeFormData {
   firstName: string; lastName: string; email: string; phone: string;
   position: string; department: string; role: UserRole;
   managerId: string; status: "ACTIVE" | "INACTIVE"; password: string;
+  annualLeaveAllocation: string;
 }
 
 function EmployeeForm({
@@ -3646,6 +3671,16 @@ function EmployeeForm({
         <option value="">None</option>
         {managers.map((m) => <option key={m.id} value={m.id}>{m.name}</option>)}
       </Select>
+      <Input
+        label="Annual Leave Allocation *"
+        type="number"
+        min="0"
+        step="1"
+        value={initial.annualLeaveAllocation}
+        onChange={(e) => onChange({ ...initial, annualLeaveAllocation: e.target.value })}
+        error={errors.annualLeaveAllocation}
+        placeholder="21"
+      />
       <Select label="Account Status" value={initial.status} onChange={field("status")}>
         <option value="ACTIVE">Active</option>
         <option value="INACTIVE">Inactive</option>
@@ -3662,7 +3697,7 @@ function EmployeeForm({
 const EMPTY_FORM: EmployeeFormData = {
   firstName: "", lastName: "", email: "", phone: "",
   position: "", department: "", role: "EMPLOYEE" as UserRole,
-  managerId: "", status: "ACTIVE", password: "",
+  managerId: "", status: "ACTIVE", password: "", annualLeaveAllocation: "21",
 };
 
 function HREmployeesPage() {
@@ -3706,6 +3741,7 @@ function HREmployeesPage() {
       firstName: emp.firstName, lastName: emp.lastName, email: emp.email,
       phone: emp.phone ?? "", position: emp.position, department: emp.department,
       role: emp.role, managerId: emp.managerId ?? "", status: emp.status, password: "",
+      annualLeaveAllocation: String(emp.annualLeaveAllocation ?? 0),
     });
     setEditErrors({});
   }
@@ -3723,6 +3759,7 @@ function HREmployeesPage() {
       ...addForm,
       managerId: addForm.managerId || null,
       phone: addForm.phone || undefined,
+      annualLeaveAllocation: Number(addForm.annualLeaveAllocation),
     });
     setAddSaving(false);
     if (!result.ok) { setAddErrors((result as { ok: false; errors: Record<string, string> }).errors); return; }
@@ -3749,6 +3786,7 @@ function HREmployeesPage() {
       role: editForm.role,
       managerId: editForm.managerId || null,
       status: editForm.status,
+      annualLeaveAllocation: Number(editForm.annualLeaveAllocation),
     });
     setEditSaving(false);
     setEditTarget(null);

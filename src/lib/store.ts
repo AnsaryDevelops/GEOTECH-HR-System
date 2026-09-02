@@ -37,6 +37,7 @@ export interface EmployeeProfile {
   status: "ACTIVE" | "INACTIVE";
   managerId: string | null;
   role: UserRole;
+  annualLeaveAllocation?: number;
 }
 
 export function empName(e: EmployeeProfile): string {
@@ -54,14 +55,14 @@ export const DEPARTMENTS = [
 export type Department = (typeof DEPARTMENTS)[number];
 
 export const DEFAULT_EMPLOYEES: EmployeeProfile[] = [
-  { id: "EMP-00001", name: "Alex Morgan", firstName: "Alex", lastName: "Morgan", position: "Product Designer", department: "IT", email: "alex.morgan@company.com", phone: "+20 10 0000 0001", status: "ACTIVE", managerId: "EMP-00002", role: "EMPLOYEE" },
-  { id: "EMP-00002", name: "Jordan Lee", firstName: "Jordan", lastName: "Lee", position: "Engineering Manager", department: "IT", email: "jordan.lee@company.com", phone: "+20 10 0000 0002", status: "ACTIVE", managerId: null, role: "MANAGER" },
-  { id: "EMP-00003", name: "Riley Chen", firstName: "Riley", lastName: "Chen", position: "HR Specialist", department: "Human Resources", email: "riley.chen@company.com", phone: "+20 10 0000 0003", status: "ACTIVE", managerId: null, role: "HR" },
-  { id: "EMP-00004", name: "Nour Khalil", firstName: "Nour", lastName: "Khalil", position: "Frontend Developer", department: "IT", email: "nour.khalil@company.com", phone: "+20 10 0000 0004", status: "ACTIVE", managerId: "EMP-00002", role: "EMPLOYEE" },
-  { id: "EMP-00005", name: "Sami Hadid", firstName: "Sami", lastName: "Hadid", position: "Backend Developer", department: "IT", email: "sami.hadid@company.com", phone: "+20 10 0000 0005", status: "ACTIVE", managerId: "EMP-00002", role: "EMPLOYEE" },
-  { id: "EMP-00006", name: "Sara Mohamed", firstName: "Sara", lastName: "Mohamed", position: "Operations Manager", department: "Operations", email: "sara.mohamed@company.com", phone: "+20 10 0000 0006", status: "ACTIVE", managerId: null, role: "MANAGER" },
-  { id: "EMP-00007", name: "Omar Hassan", firstName: "Omar", lastName: "Hassan", position: "Operations Analyst", department: "Operations", email: "omar.hassan@company.com", phone: "+20 10 0000 0007", status: "ACTIVE", managerId: "EMP-00006", role: "EMPLOYEE" },
-  { id: "EMP-INACTIVE", name: "Sam Park", firstName: "Sam", lastName: "Park", position: "QA Engineer", department: "IT", email: "sam.park@company.com", status: "INACTIVE", managerId: "EMP-00002", role: "EMPLOYEE" },
+  { id: "EMP-00001", name: "Alex Morgan", firstName: "Alex", lastName: "Morgan", position: "Product Designer", department: "IT", email: "alex.morgan@company.com", phone: "+20 10 0000 0001", status: "ACTIVE", managerId: "EMP-00002", role: "EMPLOYEE", annualLeaveAllocation: 21 },
+  { id: "EMP-00002", name: "Jordan Lee", firstName: "Jordan", lastName: "Lee", position: "Engineering Manager", department: "IT", email: "jordan.lee@company.com", phone: "+20 10 0000 0002", status: "ACTIVE", managerId: null, role: "MANAGER", annualLeaveAllocation: 21 },
+  { id: "EMP-00003", name: "Riley Chen", firstName: "Riley", lastName: "Chen", position: "HR Specialist", department: "Human Resources", email: "riley.chen@company.com", phone: "+20 10 0000 0003", status: "ACTIVE", managerId: null, role: "HR", annualLeaveAllocation: 21 },
+  { id: "EMP-00004", name: "Nour Khalil", firstName: "Nour", lastName: "Khalil", position: "Frontend Developer", department: "IT", email: "nour.khalil@company.com", phone: "+20 10 0000 0004", status: "ACTIVE", managerId: "EMP-00002", role: "EMPLOYEE", annualLeaveAllocation: 21 },
+  { id: "EMP-00005", name: "Sami Hadid", firstName: "Sami", lastName: "Hadid", position: "Backend Developer", department: "IT", email: "sami.hadid@company.com", phone: "+20 10 0000 0005", status: "ACTIVE", managerId: "EMP-00002", role: "EMPLOYEE", annualLeaveAllocation: 21 },
+  { id: "EMP-00006", name: "Sara Mohamed", firstName: "Sara", lastName: "Mohamed", position: "Operations Manager", department: "Operations", email: "sara.mohamed@company.com", phone: "+20 10 0000 0006", status: "ACTIVE", managerId: null, role: "MANAGER", annualLeaveAllocation: 21 },
+  { id: "EMP-00007", name: "Omar Hassan", firstName: "Omar", lastName: "Hassan", position: "Operations Analyst", department: "Operations", email: "omar.hassan@company.com", phone: "+20 10 0000 0007", status: "ACTIVE", managerId: "EMP-00006", role: "EMPLOYEE", annualLeaveAllocation: 21 },
+  { id: "EMP-INACTIVE", name: "Sam Park", firstName: "Sam", lastName: "Park", position: "QA Engineer", department: "IT", email: "sam.park@company.com", status: "INACTIVE", managerId: "EMP-00002", role: "EMPLOYEE", annualLeaveAllocation: 21 },
 ];
 
 // Security: managerId always comes from session, never from client input.
@@ -165,6 +166,29 @@ export function saveStore(data: StoreData): void {
 
 // ─── Employee creation validation ─────────────────────────────────────────────
 
+export function calculateWorkingLeaveDays(startDate: string, endDate: string): number {
+  if (!startDate || !endDate) return 0;
+
+  const start = new Date(`${startDate}T00:00:00`);
+  const end = new Date(`${endDate}T00:00:00`);
+
+  if (Number.isNaN(start.getTime()) || Number.isNaN(end.getTime())) return 0;
+  if (end < start) return 0;
+
+  let count = 0;
+  const current = new Date(start);
+
+  while (current <= end) {
+    const day = current.getDay();
+    if (day >= 0 && day <= 4) {
+      count += 1;
+    }
+    current.setDate(current.getDate() + 1);
+  }
+
+  return count;
+}
+
 export function validateEmployeeFields(
   data: {
     firstName?: string;
@@ -174,6 +198,7 @@ export function validateEmployeeFields(
     department?: string;
     role?: string;
     managerId?: string;
+    annualLeaveAllocation?: number | string;
   },
   employees: EmployeeProfile[],
   editingId?: string
@@ -195,6 +220,15 @@ export function validateEmployeeFields(
   if (!data.position?.trim()) errors.position = "Position is required.";
   if (!data.department?.trim()) errors.department = "Department is required.";
   if (!data.role) errors.role = "Role is required.";
+
+  if (data.annualLeaveAllocation === undefined || data.annualLeaveAllocation === null || String(data.annualLeaveAllocation).trim() === "") {
+    errors.annualLeaveAllocation = "Annual Leave Allocation is required.";
+  } else {
+    const value = Number(data.annualLeaveAllocation);
+    if (!Number.isInteger(value) || value < 0) {
+      errors.annualLeaveAllocation = "Annual Leave Allocation must be a whole number greater than or equal to 0.";
+    }
+  }
 
   if (data.role === "EMPLOYEE" && !data.managerId) {
     errors.managerId = "A direct manager is required for employees.";
