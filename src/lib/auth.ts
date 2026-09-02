@@ -1,185 +1,211 @@
-// Simulated authentication service.
-// In production, replace signIn with a real API call and remove DEV_USERS.
+import { supabase } from './supabase'
 
-export type UserRole = "EMPLOYEE" | "MANAGER" | "HR";
+export type UserRole = 'EMPLOYEE' | 'MANAGER' | 'HR'
 
 export interface SessionUser {
-  id: string;
-  name: string;
-  role: UserRole;
-  employeeNumber: string;
+  id: string
+  name: string
+  role: UserRole
+  employeeNumber: string
 }
 
 export interface Session {
-  user: SessionUser;
-  expiresAt: number;
+  user: SessionUser
+  expiresAt: number
 }
 
-export type AuthError = "INVALID_CREDENTIALS" | "INACTIVE_ACCOUNT" | "SYSTEM_ERROR";
+export type AuthError = 'INVALID_CREDENTIALS' | 'INACTIVE_ACCOUNT' | 'SYSTEM_ERROR'
 
 export type AuthResult =
   | { ok: true; session: Session }
-  | { ok: false; error: AuthError };
+  | { ok: false; error: AuthError }
 
-// ─── Dev-only user store ───────────────────────────────────────────────────
-// Passwords are stored here only because there is no real backend.
-// A production implementation must NEVER store credentials on the client.
-
-interface DevUser {
-  employeeNumber: string;
-  passwordHash: string;
-  name: string;
-  role: UserRole;
-  active: boolean;
+interface ProfileRow {
+  id: string
+  employee_number: string
+  name: string | null
+  role: UserRole
+  status: 'ACTIVE' | 'INACTIVE'
+  manager_id: string | null
+  first_name?: string | null
+  last_name?: string | null
 }
 
-const DEV_USERS: DevUser[] = [
-  { employeeNumber: "EMP-00001", passwordHash: "employee123", name: "Alex Morgan", role: "EMPLOYEE", active: true },
-  { employeeNumber: "EMP-00002", passwordHash: "manager123", name: "Jordan Lee", role: "MANAGER", active: true },
-  { employeeNumber: "EMP-00003", passwordHash: "hr123", name: "Riley Chen", role: "HR", active: true },
-  { employeeNumber: "EMP-00004", passwordHash: "nour123", name: "Nour Khalil", role: "EMPLOYEE", active: true },
-  { employeeNumber: "EMP-00005", passwordHash: "sami123", name: "Sami Hadid", role: "EMPLOYEE", active: true },
-  { employeeNumber: "EMP-00006", passwordHash: "sara123", name: "Sara Mohamed", role: "MANAGER", active: true },
-  { employeeNumber: "EMP-00007", passwordHash: "omar123", name: "Omar Hassan", role: "EMPLOYEE", active: true },
-  { employeeNumber: "EMP-INACTIVE", passwordHash: "inactive123", name: "Sam Park", role: "EMPLOYEE", active: false },
-];
+let currentSession: Session | null = null
+let authListenerInitialized = false
+const authListeners = new Set<(session: Session | null) => void>()
 
-// ─── HR-created user store (sessionStorage-backed) ────────────────────────────
-// When HR creates a new employee, their credentials are added here.
-// This is separate from DEV_USERS so auth.ts has no dependency on store.ts.
-
-const HR_USERS_KEY = "hr_portal_hr_users_v1";
-
-interface HRUser {
-  employeeNumber: string;
-  passwordHash: string;
-  name: string;
-  role: UserRole;
-  active: boolean;
+function mapEmployeeIdToEmail(employeeNumber: string): string {
+  return `${employeeNumber.trim()}@hr.company.internal`
 }
 
-function loadHRUsers(): HRUser[] {
-  try {
-    const raw = sessionStorage.getItem(HR_USERS_KEY);
-    if (raw) return JSON.parse(raw) as HRUser[];
-  } catch {}
-  return [];
+function normalizeRole(role: string | null | undefined): UserRole {
+  if (role === 'MANAGER') return 'MANAGER'
+  if (role === 'HR') return 'HR'
+  return 'EMPLOYEE'
 }
 
-function saveHRUsers(users: HRUser[]): void {
-  try {
-    sessionStorage.setItem(HR_USERS_KEY, JSON.stringify(users));
-  } catch {}
-}
+async function getProfileForCurrentUser(userId: string): Promise<ProfileRow | null> {
+  const { data, error } = await supabase
+    .from('profiles')
+    .select('id, employee_number, name, role, status, manager_id, first_name, last_name')
+    .eq('id', userId)
+    .maybeSingle()
 
-// Called by StoreProvider when HR creates a new employee.
-export function createHRUserCredential(data: {
-  employeeNumber: string;
-  name: string;
-  role: UserRole;
-  password: string;
-}): void {
-  const users = loadHRUsers();
-  const existing = users.findIndex((u) => u.employeeNumber === data.employeeNumber);
-  const record: HRUser = {
-    employeeNumber: data.employeeNumber,
-    name: data.name,
-    role: data.role,
-    passwordHash: data.password,
-    active: true,
-  };
-  if (existing >= 0) users[existing] = record;
-  else users.push(record);
-  saveHRUsers(users);
-}
-
-// Called by StoreProvider when HR updates an employee.
-export function updateHRUserCredential(
-  employeeNumber: string,
-  updates: { name?: string; role?: UserRole; active?: boolean }
-): void {
-  const users = loadHRUsers();
-  const u = users.find((u) => u.employeeNumber === employeeNumber);
-  if (u) {
-    if (updates.name !== undefined) u.name = updates.name;
-    if (updates.role !== undefined) u.role = updates.role;
-    if (updates.active !== undefined) u.active = updates.active;
-    saveHRUsers(users);
+  if (error || !data) {
+    return null
   }
-  // For DEV_USERS, we can't update them at runtime (they are hardcoded).
-  // A real backend would handle this with a database update.
+
+  return data as ProfileRow
 }
 
-// ─── Lookup ────────────────────────────────────────────────────────────────────
+async function buildSessionFromAuthUser(userId: string): Promise<Session | null> {
+  const profile = await getProfileForCurrentUser(userId)
 
-function findUser(employeeNumber: string): DevUser | HRUser | undefined {
-  const normed = employeeNumber.trim().toLowerCase();
-  const devUser = DEV_USERS.find((u) => u.employeeNumber.toLowerCase() === normed);
-  if (devUser) return devUser;
-  return loadHRUsers().find((u) => u.employeeNumber.toLowerCase() === normed);
+  if (!profile) {
+    return null
+  }
+
+  if (profile.status !== 'ACTIVE') {
+    await supabase.auth.signOut()
+    return null
+  }
+
+  const resolvedName = profile.name ?? ([profile.first_name, profile.last_name].filter(Boolean).join(' ') || 'Unknown User')
+
+  return {
+    user: {
+      id: profile.id,
+      name: resolvedName,
+      role: normalizeRole(profile.role),
+      employeeNumber: profile.employee_number,
+    },
+    expiresAt: Date.now() + 8 * 60 * 60 * 1000,
+  }
 }
 
-// ─── Session ───────────────────────────────────────────────────────────────────
+async function syncCurrentSessionFromSupabase(): Promise<Session | null> {
+  const { data: { session: supabaseSession }, error } = await supabase.auth.getSession()
 
-const SESSION_KEY = "hr_portal_session";
-const SESSION_TTL_MS = 8 * 60 * 60 * 1000; // 8 hours
+  if (error || !supabaseSession?.user) {
+    currentSession = null
+    return null
+  }
 
-// ─── Public API ────────────────────────────────────────────────────────────────
+  const session = await buildSessionFromAuthUser(supabaseSession.user.id)
+  currentSession = session
+  return session
+}
 
-export async function signIn(employeeNumber: string, password: string): Promise<AuthResult> {
-  await new Promise((r) => setTimeout(r, 600 + Math.random() * 400));
+function notifyAuthListeners(session: Session | null): void {
+  for (const listener of authListeners) {
+    listener(session)
+  }
+}
 
-  try {
-    const user = findUser(employeeNumber);
+function ensureAuthListener(): void {
+  if (authListenerInitialized) return
 
-    if (!user || user.passwordHash !== password) {
-      return { ok: false, error: "INVALID_CREDENTIALS" };
+  authListenerInitialized = true
+
+  supabase.auth.onAuthStateChange(async (_event, supabaseSession) => {
+    if (!supabaseSession?.user) {
+      currentSession = null
+      notifyAuthListeners(null)
+      return
     }
 
-    if (!user.active) {
-      return { ok: false, error: "INACTIVE_ACCOUNT" };
-    }
+    const session = await buildSessionFromAuthUser(supabaseSession.user.id)
+    currentSession = session
+    notifyAuthListeners(session)
+  })
 
-    const session: Session = {
-      user: {
-        id: user.employeeNumber,
-        name: user.name,
-        role: user.role,
-        employeeNumber: user.employeeNumber,
-      },
-      expiresAt: Date.now() + SESSION_TTL_MS,
-    };
-
-    sessionStorage.setItem(SESSION_KEY, JSON.stringify(session));
-    return { ok: true, session };
-  } catch {
-    return { ok: false, error: "SYSTEM_ERROR" };
-  }
+  void syncCurrentSessionFromSupabase()
 }
 
 export function getSession(): Session | null {
+  return currentSession
+}
+
+export async function signIn(employeeNumber: string, password: string): Promise<AuthResult> {
+  const normalizedEmployeeNumber = employeeNumber.trim()
+
+  if (!normalizedEmployeeNumber) {
+    return { ok: false, error: 'INVALID_CREDENTIALS' }
+  }
+
   try {
-    const raw = sessionStorage.getItem(SESSION_KEY);
-    if (!raw) return null;
-    const session: Session = JSON.parse(raw);
-    if (Date.now() > session.expiresAt) {
-      sessionStorage.removeItem(SESSION_KEY);
-      return null;
+    const authEmail = mapEmployeeIdToEmail(normalizedEmployeeNumber)
+    const { data: signInData, error: signInError } = await supabase.auth.signInWithPassword({
+      email: authEmail,
+      password,
+    })
+
+    if (signInError || !signInData?.user) {
+      const code = signInError?.code ?? ''
+      if (code === 'invalid_credentials' || code === 'user_not_found') {
+        return { ok: false, error: 'INVALID_CREDENTIALS' }
+      }
+      return { ok: false, error: 'SYSTEM_ERROR' }
     }
-    return session;
+
+    const session = await buildSessionFromAuthUser(signInData.user.id)
+
+    if (!session) {
+      await supabase.auth.signOut()
+      currentSession = null
+      return { ok: false, error: 'INACTIVE_ACCOUNT' }
+    }
+
+    currentSession = session
+    notifyAuthListeners(session)
+    return { ok: true, session }
   } catch {
-    return null;
+    return { ok: false, error: 'SYSTEM_ERROR' }
   }
 }
 
 export function signOut(): void {
-  sessionStorage.removeItem(SESSION_KEY);
+  void supabase.auth.signOut().then(() => {
+    currentSession = null
+    notifyAuthListeners(null)
+  })
 }
 
 export function dashboardPath(role: UserRole): string {
   switch (role) {
-    case "EMPLOYEE": return "/employee/dashboard";
-    case "MANAGER":  return "/manager/dashboard";
-    case "HR":       return "/hr/dashboard";
+    case 'EMPLOYEE':
+      return '/employee/dashboard'
+    case 'MANAGER':
+      return '/manager/dashboard'
+    case 'HR':
+      return '/hr/dashboard'
   }
+}
+
+export function subscribeToAuthChanges(callback: (session: Session | null) => void) {
+  ensureAuthListener()
+  authListeners.add(callback)
+
+  return () => {
+    authListeners.delete(callback)
+  }
+}
+
+export function createHRUserCredential(_data: {
+  employeeNumber: string
+  name: string
+  role: UserRole
+  password: string
+}): void {
+  // Phase 2.2 intentionally does not implement HR-created auth user creation.
+  // This is deferred to a secure server-side implementation later.
+}
+
+export function updateHRUserCredential(
+  _employeeNumber: string,
+  _updates: { name?: string; role?: UserRole; active?: boolean }
+): void {
+  // Phase 2.2 intentionally does not implement HR runtime credential updates.
+  // Profile data remains database-owned; auth changes are handled by Supabase.
 }
