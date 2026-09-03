@@ -1,0 +1,5 @@
+[functions.create-employee]
+verify_jwt = true
+
+[functions.fix-emp-password]
+verify_jwt = false
