@@ -7,6 +7,7 @@ export interface SessionUser {
   name: string
   role: UserRole
   employeeNumber: string
+  managerId: string | null
 }
 
 export interface Session {
@@ -79,6 +80,7 @@ async function buildSessionFromAuthUser(userId: string): Promise<Session | null>
       name: resolvedName,
       role: normalizeRole(profile.role),
       employeeNumber: profile.employee_number,
+      managerId: profile.manager_id,
     },
     expiresAt: Date.now() + 8 * 60 * 60 * 1000,
   }

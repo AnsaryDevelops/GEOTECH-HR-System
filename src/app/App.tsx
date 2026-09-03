@@ -17,11 +17,15 @@ import {
   useLocation,
 } from "react-router";
 import {
-  getManagerForEmployee,
   validateLeaveFields,
   validateMissionFields,
   validateEmployeeFields,
   loadStore,
+  loadEmployeeProfiles,
+  loadRequests,
+  loadNotifications,
+  loadLeaveTypes,
+  mapRequestRow,
   saveStore,
   getTeamForManager,
   getEligibleManagers,
@@ -48,6 +52,7 @@ import {
 } from "../lib/auth";
 import companyLogoSrc from "../imports/GEO_Egypt_LOGO-01.png";
 import type { Session } from "../lib/auth";
+import { supabase } from "../lib/supabase";
 import { clsx, type ClassValue } from "clsx";
 import { twMerge } from "tailwind-merge";
 import { Eye, EyeOff, Loader as Loader2, CircleAlert as AlertCircle, CircleCheck as CheckCircle2, Bell, ChevronDown, Chrome as Home, FileText, Users, Settings, LogOut, Menu, X, User, Search, Calendar, Clock, Upload, MoveVertical as MoreVertical, Info, Plus, ArrowLeft, ChevronRight, ChevronLeft, Briefcase, Umbrella, Check, Circle as XCircle, BellRing, CalendarDays } from "lucide-react";
@@ -1520,46 +1525,93 @@ interface CreateEmployeeInput {
 
 interface StoreContextValue {
   requests: RequestRecord[];
+  requestsLoading: boolean;
+  requestsError: string | null;
   notifications: NotificationRecord[];
+  notificationsLoading: boolean;
+  notificationsError: string | null;
+  leaveTypesLoading: boolean;
+  leaveTypesError: string | null;
   employees: EmployeeProfile[];
+  employeesLoading: boolean;
+  employeesError: string | null;
   leaveTypes: LeaveTypeRecord[];
   createLeaveRequest: (
     employeeId: string, employeeName: string,
     data: { leaveType: string; startDate: string; endDate: string; reason?: string }
-  ) => { ok: true; request: RequestRecord } | { ok: false; errors: Record<string, string> };
+  ) => Promise<{ ok: true; request: RequestRecord } | { ok: false; errors: Record<string, string> }>;
   createMissionRequest: (
     employeeId: string, employeeName: string,
     data: { startDate: string; startTime: string; endDate: string; endTime: string; location: string; purpose: string }
-  ) => { ok: true; request: RequestRecord } | { ok: false; errors: Record<string, string> };
-  approveRequest: (requestId: string, managerId: string) => void;
-  rejectRequest: (requestId: string, managerId: string, comment: string) => void;
+  ) => Promise<{ ok: true; request: RequestRecord } | { ok: false; errors: Record<string, string> }>;
+  approveRequest: (requestId: string) => Promise<{ ok: true; request: RequestRecord } | { ok: false; errors: Record<string, string> }>;
+  rejectRequest: (requestId: string, comment: string) => Promise<{ ok: true; request: RequestRecord } | { ok: false; errors: Record<string, string> }>;
   markNotificationRead: (id: string) => void;
   // HR-only operations
   createEmployee: (
     data: CreateEmployeeInput
   ) => { ok: true; employee: EmployeeProfile; password: string } | { ok: false; errors: Record<string, string> };
   updateEmployee: (id: string, data: Partial<EmployeeProfile>) => void;
-  createLeaveType: (name: string) => LeaveTypeRecord;
-  updateLeaveType: (id: string, updates: Partial<LeaveTypeRecord>) => void;
+  createLeaveType: (name: string) => Promise<{ leaveType?: LeaveTypeRecord; error?: string }>;
+  updateLeaveType: (id: string, updates: Partial<LeaveTypeRecord>) => Promise<{ leaveType?: LeaveTypeRecord; error?: string }>;
 }
 
 const StoreCtx = createContext<StoreContextValue | null>(null);
 
 function StoreProvider({ children }: { children?: React.ReactNode }) {
-  const [store, setStore] = useState<StoreData>(() => loadStore());
+  const { session } = useAuth();
+  const [store, setStore] = useState<StoreData>(() => ({ ...loadStore(), employees: [], requests: [], notifications: [], leaveTypes: [] }));
+  const [employeesLoading, setEmployeesLoading] = useState(true);
+  const [employeesError, setEmployeesError] = useState<string | null>(null);
+  const [requestsLoading, setRequestsLoading] = useState(true);
+  const [requestsError, setRequestsError] = useState<string | null>(null);
+  const [notificationsLoading, setNotificationsLoading] = useState(true);
+  const [notificationsError, setNotificationsError] = useState<string | null>(null);
+  const [leaveTypesLoading, setLeaveTypesLoading] = useState(true);
+  const [leaveTypesError, setLeaveTypesError] = useState<string | null>(null);
+
+  useEffect(() => {
+    const userId = session?.user.id;
+    if (!userId) {
+      setStore((prev) => ({ ...prev, employees: [], requests: [], notifications: [], leaveTypes: [] }));
+      setEmployeesLoading(false);
+      setRequestsLoading(false);
+      setNotificationsLoading(false);
+      setLeaveTypesLoading(false);
+      return;
+    }
+    let cancelled = false;
+    setEmployeesLoading(true);
+    setRequestsLoading(true);
+    setNotificationsLoading(true);
+    setLeaveTypesLoading(true);
+    void Promise.all([loadEmployeeProfiles(), loadRequests(), loadNotifications(userId), loadLeaveTypes()]).then(([employeeResult, requestResult, notificationResult, leaveTypeResult]) => {
+      if (cancelled) return;
+      setStore((prev) => ({ ...prev, employees: employeeResult.employees, requests: requestResult.requests, notifications: notificationResult.notifications, leaveTypes: leaveTypeResult.leaveTypes }));
+      setEmployeesError(employeeResult.error);
+      setRequestsError(requestResult.error);
+      setNotificationsError(notificationResult.error);
+      setLeaveTypesError(leaveTypeResult.error);
+      setEmployeesLoading(false);
+      setRequestsLoading(false);
+      setNotificationsLoading(false);
+      setLeaveTypesLoading(false);
+    });
+    return () => { cancelled = true; };
+  }, [session?.user.id]);
 
   function mutate(updater: (prev: StoreData) => StoreData) {
-    setStore((prev) => { const next = updater(prev); saveStore(next); return next; });
+    setStore((prev) => {
+      const next = updater(prev);
+      saveStore({ ...next, requests: [], notifications: [], leaveTypes: [] });
+      return next;
+    });
   }
 
-  function createLeaveRequest(
+  async function createLeaveRequest(
     employeeId: string, employeeName: string,
     data: { leaveType: string; startDate: string; endDate: string; reason?: string }
   ) {
-    const manager = getManagerForEmployee(store.employees, employeeId);
-    if (!manager || manager.status !== "ACTIVE") {
-      return { ok: false as const, errors: { _form: "No active manager assigned. Contact HR." } };
-    }
     const errs = validateLeaveFields(
       data,
       store.requests.filter((r) => r.employeeId === employeeId),
@@ -1567,86 +1619,77 @@ function StoreProvider({ children }: { children?: React.ReactNode }) {
     );
     if (Object.keys(errs).length > 0) return { ok: false as const, errors: errs };
 
-    const id = crypto.randomUUID();
-    const requestNumber = `REQ-${String(store.nextSeq).padStart(5, "0")}`;
-    const request: RequestRecord = {
-      id, requestNumber, employeeId, employeeName,
-      managerId: manager.id, managerName: empName(manager),
-      type: "LEAVE", status: "PENDING", submittedAt: new Date().toISOString(),
-      leaveType: data.leaveType, startDate: data.startDate,
-      endDate: data.endDate, reason: data.reason,
-    };
-    const notif: NotificationRecord = {
-      id: crypto.randomUUID(), userId: manager.id, type: "REQUEST_SUBMITTED",
-      requestId: id, message: `${employeeName} submitted a ${data.leaveType} request.`,
-      read: false, createdAt: new Date().toISOString(),
-    };
-    mutate((p) => ({ ...p, requests: [...p.requests, request], notifications: [...p.notifications, notif], nextSeq: p.nextSeq + 1 }));
+    const employee = store.employees.find((profile) => profile.id === employeeId);
+    const manager = employee?.managerId ? store.employees.find((profile) => profile.id === employee.managerId) : undefined;
+    if (!employee?.managerId) return { ok: false as const, errors: { _form: "No direct manager is assigned." } };
+    const { data: row, error } = await supabase.from("requests").insert({
+      employee_id: employeeId, employee_name: employeeName,
+      manager_id: employee.managerId, manager_name: manager?.name ?? "Direct Manager",
+      type: "LEAVE", status: "PENDING", leave_type_name: data.leaveType,
+      start_date: data.startDate, end_date: data.endDate, reason: data.reason,
+    }).select("id,request_number,employee_id,employee_name,manager_id,manager_name,type,status,submitted_at,leave_type_id,leave_type_name,start_date,end_date,reason,start_time,end_time,location,purpose,decided_at,decision_comment").single();
+    if (error || !row) return { ok: false as const, errors: { _form: error?.message ?? "Unable to submit request." } };
+    const request = mapRequestRow(row as Parameters<typeof mapRequestRow>[0]);
+    mutate((p) => ({ ...p, requests: [...p.requests, request] }));
     return { ok: true as const, request };
   }
 
-  function createMissionRequest(
+  async function createMissionRequest(
     employeeId: string, employeeName: string,
     data: { startDate: string; startTime: string; endDate: string; endTime: string; location: string; purpose: string }
   ) {
-    const manager = getManagerForEmployee(store.employees, employeeId);
-    if (!manager || manager.status !== "ACTIVE") {
-      return { ok: false as const, errors: { _form: "No active manager assigned. Contact HR." } };
-    }
     const errs = validateMissionFields(data);
     if (Object.keys(errs).length > 0) return { ok: false as const, errors: errs };
 
-    const id = crypto.randomUUID();
-    const requestNumber = `REQ-${String(store.nextSeq).padStart(5, "0")}`;
-    const request: RequestRecord = {
-      id, requestNumber, employeeId, employeeName,
-      managerId: manager.id, managerName: empName(manager),
-      type: "MISSION", status: "PENDING", submittedAt: new Date().toISOString(),
-      startDate: data.startDate, startTime: data.startTime,
-      endDate: data.endDate, endTime: data.endTime,
+    const employee = store.employees.find((profile) => profile.id === employeeId);
+    const manager = employee?.managerId ? store.employees.find((profile) => profile.id === employee.managerId) : undefined;
+    if (!employee?.managerId) return { ok: false as const, errors: { _form: "No direct manager is assigned." } };
+    const { data: row, error } = await supabase.from("requests").insert({
+      employee_id: employeeId, employee_name: employeeName,
+      manager_id: employee.managerId, manager_name: manager?.name ?? "Direct Manager",
+      type: "MISSION", status: "PENDING", start_date: data.startDate,
+      start_time: data.startTime, end_date: data.endDate, end_time: data.endTime,
       location: data.location, purpose: data.purpose,
-    };
-    const notif: NotificationRecord = {
-      id: crypto.randomUUID(), userId: manager.id, type: "REQUEST_SUBMITTED",
-      requestId: id, message: `${employeeName} submitted a Mission request.`,
-      read: false, createdAt: new Date().toISOString(),
-    };
-    mutate((p) => ({ ...p, requests: [...p.requests, request], notifications: [...p.notifications, notif], nextSeq: p.nextSeq + 1 }));
+    }).select("id,request_number,employee_id,employee_name,manager_id,manager_name,type,status,submitted_at,leave_type_id,leave_type_name,start_date,end_date,reason,start_time,end_time,location,purpose,decided_at,decision_comment").single();
+    if (error || !row) return { ok: false as const, errors: { _form: error?.message ?? "Unable to submit request." } };
+    const request = mapRequestRow(row as Parameters<typeof mapRequestRow>[0]);
+    mutate((p) => ({ ...p, requests: [...p.requests, request] }));
     return { ok: true as const, request };
   }
 
-  function approveRequest(requestId: string, managerId: string) {
-    mutate((prev) => {
-      const req = prev.requests.find((r) => r.id === requestId);
-      if (!req || req.status !== "PENDING" || req.managerId !== managerId) return prev;
-      const updated = { ...req, status: "APPROVED" as const, decidedAt: new Date().toISOString() };
-      const label = req.type === "LEAVE" ? (req.leaveType ?? "Leave") : "Mission";
-      const notif: NotificationRecord = {
-        id: crypto.randomUUID(), userId: req.employeeId, type: "REQUEST_APPROVED",
-        requestId, message: `Your ${label} request (${req.requestNumber}) has been approved.`,
-        read: false, createdAt: new Date().toISOString(),
-      };
-      return { ...prev, requests: prev.requests.map((r) => r.id === requestId ? updated : r), notifications: [...prev.notifications, notif] };
-    });
+  async function approveRequest(requestId: string) {
+    return updateRequestDecision(requestId, "APPROVED");
   }
 
-  function rejectRequest(requestId: string, managerId: string, comment: string) {
-    mutate((prev) => {
-      const req = prev.requests.find((r) => r.id === requestId);
-      if (!req || req.status !== "PENDING" || req.managerId !== managerId) return prev;
-      const updated = { ...req, status: "REJECTED" as const, decidedAt: new Date().toISOString(), decisionComment: comment };
-      const label = req.type === "LEAVE" ? (req.leaveType ?? "Leave") : "Mission";
-      const notif: NotificationRecord = {
-        id: crypto.randomUUID(), userId: req.employeeId, type: "REQUEST_REJECTED",
-        requestId, message: `Your ${label} request (${req.requestNumber}) has been rejected.`,
-        read: false, createdAt: new Date().toISOString(),
-      };
-      return { ...prev, requests: prev.requests.map((r) => r.id === requestId ? updated : r), notifications: [...prev.notifications, notif] };
-    });
+  async function rejectRequest(requestId: string, comment: string) {
+    return updateRequestDecision(requestId, "REJECTED", comment);
   }
 
-  function markNotificationRead(id: string) {
-    mutate((p) => ({ ...p, notifications: p.notifications.map((n) => n.id === id ? { ...n, read: true } : n) }));
+  async function updateRequestDecision(requestId: string, status: "APPROVED" | "REJECTED", comment?: string) {
+    const request = store.requests.find((item) => item.id === requestId);
+    if (!request || request.managerId !== getSession()?.user.id) {
+      return { ok: false as const, errors: { _form: "You are not authorized to decide this request." } };
+    }
+    const { data: row, error } = await supabase.from("requests")
+      .update({ status, decided_at: new Date().toISOString(), decision_comment: comment ?? null })
+      .eq("id", requestId)
+      .eq("manager_id", request.managerId)
+      .select("id,request_number,employee_id,employee_name,manager_id,manager_name,type,status,submitted_at,leave_type_id,leave_type_name,start_date,end_date,reason,start_time,end_time,location,purpose,decided_at,decision_comment")
+      .single();
+    if (error || !row) return { ok: false as const, errors: { _form: error?.message ?? "Unable to update request." } };
+    const updated = mapRequestRow(row as Parameters<typeof mapRequestRow>[0]);
+    mutate((prev) => ({ ...prev, requests: prev.requests.map((item) => item.id === requestId ? updated : item) }));
+    return { ok: true as const, request: updated };
+  }
+
+  async function markNotificationRead(id: string) {
+    const { error } = await supabase.from("notifications")
+      .update({ read: true })
+      .eq("id", id)
+      .eq("user_id", getSession()?.user.id ?? "");
+    if (!error) {
+      setStore((p) => ({ ...p, notifications: p.notifications.map((n) => n.id === id ? { ...n, read: true } : n) }));
+    }
   }
 
   function createEmployee(data: CreateEmployeeInput) {
@@ -1657,7 +1700,7 @@ function StoreProvider({ children }: { children?: React.ReactNode }) {
     const id = `EMP-${seq}`;
     const name = `${data.firstName.trim()} ${data.lastName.trim()}`;
     const employee: EmployeeProfile = {
-      id, name, firstName: data.firstName.trim(), lastName: data.lastName.trim(),
+      id, employeeNumber: id, name, firstName: data.firstName.trim(), lastName: data.lastName.trim(),
       position: data.position.trim(), department: data.department,
       email: data.email.trim().toLowerCase(),
       phone: data.phone?.trim() || undefined,
@@ -1698,21 +1741,35 @@ function StoreProvider({ children }: { children?: React.ReactNode }) {
     }
   }
 
-  function createLeaveType(name: string): LeaveTypeRecord {
-    const id = `lt-${store.nextLeaveTypeSeq}`;
-    const lt: LeaveTypeRecord = { id, name: name.trim(), status: "ACTIVE" };
-    mutate((p) => ({ ...p, leaveTypes: [...p.leaveTypes, lt], nextLeaveTypeSeq: p.nextLeaveTypeSeq + 1 }));
-    return lt;
+  async function createLeaveType(name: string): Promise<{ leaveType?: LeaveTypeRecord; error?: string }> {
+    const { data, error } = await supabase.from("leave_types")
+      .insert({ name: name.trim(), status: "ACTIVE" })
+      .select("id,name,status")
+      .single();
+    if (error || !data) return { error: error?.message ?? "Unable to create leave type." };
+    const leaveType = data as LeaveTypeRecord;
+    setStore((p) => ({ ...p, leaveTypes: [...p.leaveTypes, leaveType] }));
+    return { leaveType };
   }
 
-  function updateLeaveType(id: string, updates: Partial<LeaveTypeRecord>) {
-    mutate((p) => ({ ...p, leaveTypes: p.leaveTypes.map((lt) => lt.id === id ? { ...lt, ...updates } : lt) }));
+  async function updateLeaveType(id: string, updates: Partial<LeaveTypeRecord>): Promise<{ leaveType?: LeaveTypeRecord; error?: string }> {
+    const { data, error } = await supabase.from("leave_types")
+      .update({ name: updates.name?.trim(), status: updates.status })
+      .eq("id", id)
+      .select("id,name,status")
+      .single();
+    if (error || !data) return { error: error?.message ?? "Unable to update leave type." };
+    const leaveType = data as LeaveTypeRecord;
+    setStore((p) => ({ ...p, leaveTypes: p.leaveTypes.map((item) => item.id === id ? leaveType : item) }));
+    return { leaveType };
   }
 
   return (
     <StoreCtx.Provider value={{
       requests: store.requests, notifications: store.notifications,
-      employees: store.employees, leaveTypes: store.leaveTypes,
+      notificationsLoading, notificationsError,
+      requestsLoading, requestsError,
+      employees: store.employees, employeesLoading, employeesError, leaveTypes: store.leaveTypes,
       createLeaveRequest, createMissionRequest,
       approveRequest, rejectRequest, markNotificationRead,
       createEmployee, updateEmployee, createLeaveType, updateLeaveType,
@@ -1887,21 +1944,16 @@ const STATUS_BADGE: Record<"PENDING" | "APPROVED" | "REJECTED", BadgeVariant> = 
 function RequestTimeline({ request }: { request: RequestRecord }) {
   const isPending = request.status === "PENDING";
   const isApproved = request.status === "APPROVED";
-
-  const steps: {
-    label: string;
-    state: "done" | "current" | "failed" | "future";
-    date?: string;
-  }[] = [
-    { label: "Submitted", state: "done", date: request.submittedAt },
+  const steps = [
+    { label: "Submitted", state: "done" as const, date: request.submittedAt },
     {
       label: isPending ? "Pending Manager Approval" : "Manager Reviewed",
-      state: isPending ? "current" : "done",
+      state: isPending ? "current" as const : "done" as const,
       date: isPending ? undefined : request.decidedAt,
     },
     {
       label: isApproved ? "Approved" : request.status === "REJECTED" ? "Rejected" : "Decision",
-      state: isPending ? "future" : isApproved ? "done" : "failed",
+      state: isPending ? "future" as const : isApproved ? "done" as const : "failed" as const,
       date: request.decidedAt,
     },
   ];
@@ -1986,8 +2038,11 @@ function ApproverInfo({ name }: { name: string }) {
 
 function EmployeeDashboardPage() {
   const { session } = useAuth();
-  const { requests } = useStore();
+  const { requests, requestsLoading, requestsError } = useStore();
   const navigate = useNavigate();
+
+  if (requestsLoading) return <DashboardShell activeNavId="dashboard" pageTitle="Dashboard"><LoadingState message="Loading requests..." /></DashboardShell>;
+  if (requestsError) return <DashboardShell activeNavId="dashboard" pageTitle="Dashboard"><ErrorState title="Unable to load requests" description={requestsError} /></DashboardShell>;
 
   const myRequests = requests.filter((r) => r.employeeId === session!.user.id);
   const pending = myRequests.filter((r) => r.status === "PENDING").length;
@@ -2147,10 +2202,10 @@ function NewRequestPage() {
 
 function LeaveRequestPage() {
   const { session } = useAuth();
-  const { requests, leaveTypes, employees, createLeaveRequest } = useStore();
+  const { requests, leaveTypes, leaveTypesLoading, leaveTypesError, employees, employeesLoading, employeesError, createLeaveRequest } = useStore();
   const navigate = useNavigate();
 
-  const manager = getManagerForEmployee(employees, session!.user.id);
+  const managerId = session!.user.managerId;
 
   const [leaveType, setLeaveType] = useState("");
   const [startDate, setStartDate] = useState("");
@@ -2159,7 +2214,7 @@ function LeaveRequestPage() {
   const [errors, setErrors] = useState<Record<string, string>>({});
   const [submitting, setSubmitting] = useState(false);
 
-  const employee = employees.find((e) => e.id === session!.user.id) ?? null;
+  const employee = employees.find((profile) => profile.id === session!.user.id);
   const allocation = employee?.annualLeaveAllocation ?? 0;
   const requestedDays = calculateWorkingLeaveDays(startDate, endDate);
   const approvedDaysUsed = requests
@@ -2171,7 +2226,34 @@ function LeaveRequestPage() {
     setErrors((p) => { const n = { ...p }; delete n[field]; return n; });
   }
 
-  if (!manager) {
+  if (employeesLoading) {
+    return (
+      <DashboardShell activeNavId="requests" pageTitle="Request Leave">
+        <LoadingState message="Loading your profile..." />
+      </DashboardShell>
+    );
+  }
+
+  if (employeesError || !employee) {
+    return (
+      <DashboardShell activeNavId="requests" pageTitle="Request Leave">
+        <ErrorState
+          title="Unable to load your profile"
+          description={employeesError ?? "Your employee profile was not returned."}
+        />
+      </DashboardShell>
+    );
+  }
+
+  if (leaveTypesLoading) {
+    return <DashboardShell activeNavId="requests" pageTitle="Request Leave"><LoadingState message="Loading leave types..." /></DashboardShell>;
+  }
+
+  if (leaveTypesError) {
+    return <DashboardShell activeNavId="requests" pageTitle="Request Leave"><ErrorState title="Unable to load leave types" description={leaveTypesError} /></DashboardShell>;
+  }
+
+  if (!managerId) {
     return (
       <DashboardShell activeNavId="requests" pageTitle="Request Leave">
         <Alert variant="error">
@@ -2193,20 +2275,25 @@ function LeaveRequestPage() {
     if (Object.keys(errs).length > 0) { setErrors(errs); return; }
     setErrors({});
     setSubmitting(true);
-    await new Promise((r) => setTimeout(r, 700));
-    const result = createLeaveRequest(session!.user.id, session!.user.name, {
-      leaveType,
-      startDate, endDate,
-      reason: reason.trim() || undefined,
-    });
-    setSubmitting(false);
-    if (!result.ok) {
-      setErrors((result as { ok: false; errors: Record<string, string> }).errors);
-      return;
+    try {
+      await new Promise((r) => setTimeout(r, 700));
+      const result = await createLeaveRequest(session!.user.id, session!.user.name, {
+        leaveType,
+        startDate, endDate,
+        reason: reason.trim() || undefined,
+      });
+      if (!result.ok) {
+        setErrors((result as { ok: false; errors: Record<string, string> }).errors);
+        return;
+      }
+      navigate(`/employee/requests/${result.request.id}`, {
+        replace: true, state: { justSubmitted: true },
+      });
+    } catch (error) {
+      setErrors({ _form: error instanceof Error ? error.message : "Unable to submit request." });
+    } finally {
+      setSubmitting(false);
     }
-    navigate(`/employee/requests/${result.request.id}`, {
-      replace: true, state: { justSubmitted: true },
-    });
   }
 
   return (
@@ -2278,7 +2365,7 @@ function LeaveRequestPage() {
                 onChange={(e) => setReason(e.target.value)}
                 rows={3}
               />
-              <ApproverInfo name={manager.name} />
+              <ApproverInfo name="Direct Manager" />
               <div className="flex items-center gap-3 pt-1 border-t border-border">
                 <Button
                   type="button" variant="secondary"
@@ -2305,10 +2392,10 @@ function LeaveRequestPage() {
 
 function MissionRequestPage() {
   const { session } = useAuth();
-  const { employees, createMissionRequest } = useStore();
+  const { createMissionRequest } = useStore();
   const navigate = useNavigate();
 
-  const manager = getManagerForEmployee(employees, session!.user.id);
+  const managerId = session!.user.managerId;
 
   const [startDate, setStartDate] = useState("");
   const [startTime, setStartTime] = useState("");
@@ -2323,7 +2410,7 @@ function MissionRequestPage() {
     setErrors((p) => { const n = { ...p }; delete n[field]; return n; });
   }
 
-  if (!manager) {
+  if (!managerId) {
     return (
       <DashboardShell activeNavId="requests" pageTitle="Request Mission">
         <Alert variant="error">
@@ -2341,18 +2428,23 @@ function MissionRequestPage() {
     if (Object.keys(errs).length > 0) { setErrors(errs); return; }
     setErrors({});
     setSubmitting(true);
-    await new Promise((r) => setTimeout(r, 700));
-    const result = createMissionRequest(session!.user.id, session!.user.name, {
-      startDate, startTime, endDate, endTime, location, purpose,
-    });
-    setSubmitting(false);
-    if (!result.ok) {
-      setErrors((result as { ok: false; errors: Record<string, string> }).errors);
-      return;
+    try {
+      await new Promise((r) => setTimeout(r, 700));
+      const result = await createMissionRequest(session!.user.id, session!.user.name, {
+        startDate, startTime, endDate, endTime, location, purpose,
+      });
+      if (!result.ok) {
+        setErrors((result as { ok: false; errors: Record<string, string> }).errors);
+        return;
+      }
+      navigate(`/employee/requests/${result.request.id}`, {
+        replace: true, state: { justSubmitted: true },
+      });
+    } catch (error) {
+      setErrors({ _form: error instanceof Error ? error.message : "Unable to submit request." });
+    } finally {
+      setSubmitting(false);
     }
-    navigate(`/employee/requests/${result.request.id}`, {
-      replace: true, state: { justSubmitted: true },
-    });
   }
 
   return (
@@ -2422,7 +2514,7 @@ function MissionRequestPage() {
                 error={errors.purpose}
                 rows={3}
               />
-              <ApproverInfo name={manager.name} />
+              <ApproverInfo name="Direct Manager" />
               <div className="flex items-center gap-3 pt-1 border-t border-border">
                 <Button
                   type="button" variant="secondary"
@@ -2450,8 +2542,11 @@ function MissionRequestPage() {
 function EmployeeRequestDetailPage() {
   const { id } = useParams<{ id: string }>();
   const location = useLocation();
-  const { requests } = useStore();
+  const { requests, requestsLoading, requestsError } = useStore();
   const navigate = useNavigate();
+
+  if (requestsLoading) return <DashboardShell activeNavId="requests" pageTitle="Request Details"><LoadingState message="Loading request..." /></DashboardShell>;
+  if (requestsError) return <DashboardShell activeNavId="requests" pageTitle="Request Details"><ErrorState title="Unable to load request" description={requestsError} /></DashboardShell>;
 
   const justSubmitted = location.state?.justSubmitted === true;
   const request = requests.find((r) => r.id === id);
@@ -2594,8 +2689,11 @@ function EmployeeRequestDetailPage() {
 
 function EmployeeRequestsPage() {
   const { session } = useAuth();
-  const { requests } = useStore();
+  const { requests, requestsLoading, requestsError } = useStore();
   const navigate = useNavigate();
+
+  if (requestsLoading) return <DashboardShell activeNavId="requests" pageTitle="My Requests"><LoadingState message="Loading requests..." /></DashboardShell>;
+  if (requestsError) return <DashboardShell activeNavId="requests" pageTitle="My Requests"><ErrorState title="Unable to load requests" description={requestsError} /></DashboardShell>;
 
   const myRequests = [...requests.filter((r) => r.employeeId === session!.user.id)].sort(
     (a, b) => new Date(b.submittedAt).getTime() - new Date(a.submittedAt).getTime()
@@ -2680,8 +2778,11 @@ function EmployeeRequestsPage() {
 
 function EmployeeNotificationsPage() {
   const { session } = useAuth();
-  const { notifications, markNotificationRead } = useStore();
+  const { notifications, notificationsLoading, notificationsError, markNotificationRead } = useStore();
   const navigate = useNavigate();
+
+  if (notificationsLoading) return <DashboardShell activeNavId="notifications" pageTitle="Notifications"><LoadingState message="Loading notifications..." /></DashboardShell>;
+  if (notificationsError) return <DashboardShell activeNavId="notifications" pageTitle="Notifications"><ErrorState title="Unable to load notifications" description={notificationsError} /></DashboardShell>;
 
   const myNotifs = [...notifications.filter((n) => n.userId === session!.user.id)].sort(
     (a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()
@@ -2750,8 +2851,11 @@ function EmployeeNotificationsPage() {
 
 function ManagerDashboardPage() {
   const { session } = useAuth();
-  const { requests } = useStore();
+  const { requests, requestsLoading, requestsError } = useStore();
   const navigate = useNavigate();
+
+  if (requestsLoading) return <DashboardShell activeNavId="dashboard" pageTitle="Dashboard"><LoadingState message="Loading requests..." /></DashboardShell>;
+  if (requestsError) return <DashboardShell activeNavId="dashboard" pageTitle="Dashboard"><ErrorState title="Unable to load requests" description={requestsError} /></DashboardShell>;
 
   const myRequests = requests.filter((r) => r.managerId === session!.user.id);
   const pending = myRequests.filter((r) => r.status === "PENDING");
@@ -2883,13 +2987,18 @@ function EmployeeDetailView({
 
 function ManagerTeamPage() {
   const { session } = useAuth();
-  const { employees } = useStore();
+  const { employees, employeesLoading, employeesError } = useStore();
   const [search, setSearch] = useState("");
   const [selected, setSelected] = useState<EmployeeProfile | null>(null);
   const [team, setTeam] = useState<EmployeeProfile[]>([]);
   const [loadState, setLoadState] = useState<"loading" | "done" | "error">("loading");
 
   useEffect(() => {
+    if (employeesLoading) return;
+    if (employeesError) {
+      setLoadState("error");
+      return;
+    }
     const timer = setTimeout(() => {
       try {
         // Security: manager ID always comes from the authenticated session, never from a URL param.
@@ -2901,7 +3010,7 @@ function ManagerTeamPage() {
       }
     }, 400);
     return () => clearTimeout(timer);
-  }, [session, employees]);
+  }, [session, employees, employeesLoading, employeesError]);
 
   if (loadState === "loading") {
     return (
@@ -3060,8 +3169,11 @@ function ManagerTeamPage() {
 
 function ManagerRequestsPage() {
   const { session } = useAuth();
-  const { requests } = useStore();
+  const { requests, requestsLoading, requestsError } = useStore();
   const navigate = useNavigate();
+
+  if (requestsLoading) return <DashboardShell activeNavId="requests" pageTitle="Requests"><LoadingState message="Loading requests..." /></DashboardShell>;
+  if (requestsError) return <DashboardShell activeNavId="requests" pageTitle="Requests"><ErrorState title="Unable to load requests" description={requestsError} /></DashboardShell>;
 
   const [filterEmployee, setFilterEmployee] = useState("");
   const [filterType, setFilterType] = useState<"" | "LEAVE" | "MISSION">("");
@@ -3251,9 +3363,12 @@ function ManagerRequestsPage() {
 
 function ManagerRequestDetailPage() {
   const { id } = useParams<{ id: string }>();
-  const { requests, approveRequest, rejectRequest } = useStore();
+  const { requests, requestsLoading, requestsError, approveRequest, rejectRequest } = useStore();
   const { session } = useAuth();
   const navigate = useNavigate();
+
+  if (requestsLoading) return <DashboardShell activeNavId="requests" pageTitle="Request Details"><LoadingState message="Loading request..." /></DashboardShell>;
+  if (requestsError) return <DashboardShell activeNavId="requests" pageTitle="Request Details"><ErrorState title="Unable to load request" description={requestsError} /></DashboardShell>;
 
   const [showRejectModal, setShowRejectModal] = useState(false);
   const [rejectComment, setRejectComment] = useState("");
@@ -3269,7 +3384,7 @@ function ManagerRequestDetailPage() {
   async function handleApprove() {
     setLoading(true);
     await new Promise((r) => setTimeout(r, 500));
-    approveRequest(request!.id, session!.user.id);
+    await approveRequest(request!.id);
     setLoading(false);
   }
 
@@ -3280,7 +3395,7 @@ function ManagerRequestDetailPage() {
     }
     setLoading(true);
     await new Promise((r) => setTimeout(r, 500));
-    rejectRequest(request!.id, session!.user.id, rejectComment.trim());
+    await rejectRequest(request!.id, rejectComment.trim());
     setShowRejectModal(false);
     setRejectComment("");
     setLoading(false);
@@ -3455,8 +3570,11 @@ function ManagerRequestDetailPage() {
 
 function ManagerNotificationsPage() {
   const { session } = useAuth();
-  const { notifications, markNotificationRead } = useStore();
+  const { notifications, notificationsLoading, notificationsError, markNotificationRead } = useStore();
   const navigate = useNavigate();
+
+  if (notificationsLoading) return <DashboardShell activeNavId="notifications" pageTitle="Notifications"><LoadingState message="Loading notifications..." /></DashboardShell>;
+  if (notificationsError) return <DashboardShell activeNavId="notifications" pageTitle="Notifications"><ErrorState title="Unable to load notifications" description={notificationsError} /></DashboardShell>;
 
   const myNotifs = [...notifications.filter((n) => n.userId === session!.user.id)].sort(
     (a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()
@@ -3516,8 +3634,11 @@ function ManagerNotificationsPage() {
 // ─── H01 — HR Dashboard ───────────────────────────────────────────────────────
 
 function HRDashboardPage() {
-  const { requests, employees, notifications } = useStore();
+  const { requests, requestsLoading, requestsError, employees, notifications } = useStore();
   const navigate = useNavigate();
+
+  if (requestsLoading) return <DashboardShell activeNavId="dashboard" pageTitle="Dashboard"><LoadingState message="Loading requests..." /></DashboardShell>;
+  if (requestsError) return <DashboardShell activeNavId="dashboard" pageTitle="Dashboard"><ErrorState title="Unable to load requests" description={requestsError} /></DashboardShell>;
 
   const totalEmp = employees.length;
   const activeEmp = employees.filter((e) => e.status === "ACTIVE").length;
@@ -3701,7 +3822,7 @@ const EMPTY_FORM: EmployeeFormData = {
 };
 
 function HREmployeesPage() {
-  const { employees, createEmployee, updateEmployee } = useStore();
+  const { employees, employeesLoading, employeesError, createEmployee, updateEmployee } = useStore();
   const [search, setSearch] = useState("");
   const [filterRole, setFilterRole] = useState<"" | UserRole>("");
   const [filterDept, setFilterDept] = useState("");
@@ -3722,6 +3843,14 @@ function HREmployeesPage() {
 
   // View detail modal
   const [viewTarget, setViewTarget] = useState<EmployeeProfile | null>(null);
+
+  if (employeesLoading) {
+    return <DashboardShell activeNavId="employees" pageTitle="Employees"><LoadingState message="Loading employee profiles..." /></DashboardShell>;
+  }
+
+  if (employeesError) {
+    return <DashboardShell activeNavId="employees" pageTitle="Employees"><ErrorState title="Unable to load employee profiles" description={employeesError} /></DashboardShell>;
+  }
 
   const eligibleManagers = getEligibleManagers(employees);
 
@@ -4019,8 +4148,11 @@ function HREmployeesPage() {
 // ─── H04 — HR Requests ────────────────────────────────────────────────────────
 
 function HRRequestsPage() {
-  const { requests, employees } = useStore();
+  const { requests, requestsLoading, requestsError, employees } = useStore();
   const navigate = useNavigate();
+
+  if (requestsLoading) return <DashboardShell activeNavId="requests" pageTitle="All Requests"><LoadingState message="Loading requests..." /></DashboardShell>;
+  if (requestsError) return <DashboardShell activeNavId="requests" pageTitle="All Requests"><ErrorState title="Unable to load requests" description={requestsError} /></DashboardShell>;
 
   const [filterManager, setFilterManager] = useState("");
   const [filterEmployee, setFilterEmployee] = useState("");
@@ -4136,8 +4268,11 @@ function HRRequestsPage() {
 
 function HRRequestDetailPage() {
   const { id } = useParams<{ id: string }>();
-  const { requests, employees } = useStore();
+  const { requests, requestsLoading, requestsError, employees } = useStore();
   const navigate = useNavigate();
+
+  if (requestsLoading) return <DashboardShell activeNavId="requests" pageTitle="Request Detail"><LoadingState message="Loading request..." /></DashboardShell>;
+  if (requestsError) return <DashboardShell activeNavId="requests" pageTitle="Request Detail"><ErrorState title="Unable to load request" description={requestsError} /></DashboardShell>;
 
   const request = requests.find((r) => r.id === id);
 
@@ -4218,8 +4353,11 @@ function HRRequestDetailPage() {
 
 function HRNotificationsPage() {
   const { session } = useAuth();
-  const { notifications, markNotificationRead } = useStore();
+  const { notifications, notificationsLoading, notificationsError, markNotificationRead } = useStore();
   const navigate = useNavigate();
+
+  if (notificationsLoading) return <DashboardShell activeNavId="notifications" pageTitle="Notifications"><LoadingState message="Loading notifications..." /></DashboardShell>;
+  if (notificationsError) return <DashboardShell activeNavId="notifications" pageTitle="Notifications"><ErrorState title="Unable to load notifications" description={notificationsError} /></DashboardShell>;
 
   const myNotifs = [...notifications.filter((n) => n.userId === session!.user.id)].sort(
     (a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()
@@ -4268,7 +4406,7 @@ function HRNotificationsPage() {
 // ─── HR Settings — Leave Types ────────────────────────────────────────────────
 
 function HRSettingsPage() {
-  const { leaveTypes, createLeaveType, updateLeaveType } = useStore();
+  const { leaveTypes, leaveTypesLoading, leaveTypesError, createLeaveType, updateLeaveType } = useStore();
 
   const [showAdd, setShowAdd] = useState(false);
   const [newName, setNewName] = useState("");
@@ -4277,27 +4415,59 @@ function HRSettingsPage() {
   const [editTarget, setEditTarget] = useState<LeaveTypeRecord | null>(null);
   const [editName, setEditName] = useState("");
   const [editError, setEditError] = useState("");
+  const [saving, setSaving] = useState(false);
 
-  function handleAdd() {
+  async function handleAdd() {
     const trimmed = newName.trim();
     if (!trimmed) { setAddError("Name is required."); return; }
     if (leaveTypes.some((lt) => lt.name.toLowerCase() === trimmed.toLowerCase())) {
       setAddError("A leave type with this name already exists."); return;
     }
-    createLeaveType(trimmed);
-    setNewName(""); setShowAdd(false); setAddError("");
+    setSaving(true);
+    try {
+      const result = await createLeaveType(trimmed);
+      if (result.error) { setAddError(result.error); return; }
+      setNewName(""); setShowAdd(false); setAddError("");
+    } catch (error) {
+      setAddError(error instanceof Error ? error.message : "Unable to create leave type.");
+    } finally {
+      setSaving(false);
+    }
   }
 
-  function handleEdit() {
+  async function handleEdit() {
     if (!editTarget) return;
     const trimmed = editName.trim();
     if (!trimmed) { setEditError("Name is required."); return; }
     if (leaveTypes.some((lt) => lt.name.toLowerCase() === trimmed.toLowerCase() && lt.id !== editTarget.id)) {
       setEditError("A leave type with this name already exists."); return;
     }
-    updateLeaveType(editTarget.id, { name: trimmed });
-    setEditTarget(null); setEditName(""); setEditError("");
+    setSaving(true);
+    try {
+      const result = await updateLeaveType(editTarget.id, { name: trimmed });
+      if (result.error) { setEditError(result.error); return; }
+      setEditTarget(null); setEditName(""); setEditError("");
+    } catch (error) {
+      setEditError(error instanceof Error ? error.message : "Unable to update leave type.");
+    } finally {
+      setSaving(false);
+    }
   }
+
+  async function handleToggle(leaveType: LeaveTypeRecord) {
+    setSaving(true);
+    try {
+      const result = await updateLeaveType(leaveType.id, { status: leaveType.status === "ACTIVE" ? "INACTIVE" : "ACTIVE" });
+      if (result.error) setEditError(result.error);
+    } catch (error) {
+      setEditError(error instanceof Error ? error.message : "Unable to update leave type.");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  if (leaveTypesLoading) return <DashboardShell activeNavId="settings" pageTitle="Settings"><LoadingState message="Loading leave types..." /></DashboardShell>;
+  if (leaveTypesError) return <DashboardShell activeNavId="settings" pageTitle="Settings"><ErrorState title="Unable to load leave types" description={leaveTypesError} /></DashboardShell>;
 
   return (
     <DashboardShell activeNavId="settings" pageTitle="Settings">
@@ -4326,7 +4496,7 @@ function HRSettingsPage() {
                 />
               </div>
               <div className="flex gap-2 pt-0.5">
-                <Button variant="primary" onClick={handleAdd}>Save</Button>
+                <Button variant="primary" onClick={handleAdd} loading={saving}>Save</Button>
                 <Button variant="secondary" onClick={() => setShowAdd(false)}>Cancel</Button>
               </div>
             </div>
@@ -4354,7 +4524,7 @@ function HRSettingsPage() {
                           />
                         </div>
                         <div className="flex gap-2 pt-0.5">
-                          <Button variant="primary" onClick={handleEdit}>Save</Button>
+                          <Button variant="primary" onClick={handleEdit} loading={saving}>Save</Button>
                           <Button variant="secondary" onClick={() => setEditTarget(null)}>Cancel</Button>
                         </div>
                       </div>
@@ -4372,7 +4542,8 @@ function HRSettingsPage() {
                         Edit
                       </button>
                       <button
-                        onClick={() => updateLeaveType(lt.id, { status: lt.status === "ACTIVE" ? "INACTIVE" : "ACTIVE" })}
+                        onClick={() => handleToggle(lt)}
+                        disabled={saving}
                         className="text-xs text-muted-foreground hover:text-foreground hover:underline"
                       >
                         {lt.status === "ACTIVE" ? "Deactivate" : "Activate"}

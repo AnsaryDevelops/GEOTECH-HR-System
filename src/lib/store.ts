@@ -1,6 +1,8 @@
 // Application data layer — requests, notifications, employees, leave types.
 // In production, replace with API calls and a real database.
 
+import { supabase } from "./supabase";
+
 export type RequestStatus = "PENDING" | "APPROVED" | "REJECTED";
 export type RequestType = "LEAVE" | "MISSION";
 export type UserRole = "EMPLOYEE" | "MANAGER" | "HR";
@@ -22,11 +24,25 @@ export const DEFAULT_LEAVE_TYPES: LeaveTypeRecord[] = [
   { id: "lt-6", name: "Unpaid Leave", status: "ACTIVE" },
 ];
 
+export async function loadLeaveTypes(): Promise<{
+  leaveTypes: LeaveTypeRecord[];
+  error: string | null;
+}> {
+  const { data, error } = await supabase
+    .from("leave_types")
+    .select("id,name,status")
+    .order("name");
+
+  if (error) return { leaveTypes: [], error: error.message };
+  return { leaveTypes: (data ?? []) as LeaveTypeRecord[], error: null };
+}
+
 // ─── Employee Profiles ────────────────────────────────────────────────────────
 // Single source of truth. managerId drives My Team, request routing, and approval.
 
 export interface EmployeeProfile {
   id: string;
+  employeeNumber: string;
   name: string;       // "Jordan Lee" — canonical display name
   firstName: string;
   lastName: string;
@@ -44,6 +60,122 @@ export function empName(e: EmployeeProfile): string {
   return e.name;
 }
 
+interface ProfileRow {
+  id: string;
+  employee_number: string;
+  first_name: string | null;
+  last_name: string | null;
+  name: string | null;
+  position: string | null;
+  department: string | null;
+  email: string | null;
+  phone: string | null;
+  status: "ACTIVE" | "INACTIVE";
+  role: UserRole;
+  manager_id: string | null;
+  annual_leave_allocation?: number | null;
+}
+
+function mapProfileToEmployee(profile: ProfileRow): EmployeeProfile {
+  const firstName = profile.first_name ?? "";
+  const lastName = profile.last_name ?? "";
+  return {
+    id: profile.id,
+    employeeNumber: profile.employee_number,
+    name: profile.name ?? `${firstName} ${lastName}`.trim(),
+    firstName,
+    lastName,
+    position: profile.position ?? "",
+    department: profile.department ?? "",
+    email: profile.email ?? "",
+    phone: profile.phone ?? undefined,
+    status: profile.status,
+    managerId: profile.manager_id,
+    role: profile.role,
+    annualLeaveAllocation: profile.annual_leave_allocation ?? undefined,
+  };
+}
+
+export async function loadEmployeeProfiles(): Promise<{
+  employees: EmployeeProfile[];
+  error: string | null;
+}> {
+  const { data, error } = await supabase
+    .from("profiles")
+    .select("*")
+    .order("employee_number");
+
+  if (error) return { employees: [], error: error.message };
+  return {
+    employees: ((data ?? []) as ProfileRow[]).map(mapProfileToEmployee),
+    error: null,
+  };
+}
+
+interface RequestRow {
+  id: string;
+  request_number: string;
+  employee_id: string;
+  employee_name: string;
+  manager_id: string;
+  manager_name: string;
+  type: RequestType;
+  status: RequestStatus;
+  submitted_at: string;
+  leave_type_name?: string | null;
+  start_date?: string | null;
+  end_date?: string | null;
+  reason?: string | null;
+  start_time?: string | null;
+  end_time?: string | null;
+  location?: string | null;
+  purpose?: string | null;
+  decided_at?: string | null;
+  decision_comment?: string | null;
+  leave_type_id?: string | null;
+}
+
+export function mapRequestRow(row: RequestRow): RequestRecord {
+  return {
+    id: row.id,
+    requestNumber: row.request_number,
+    employeeId: row.employee_id,
+    employeeName: row.employee_name,
+    managerId: row.manager_id,
+    managerName: row.manager_name,
+    type: row.type,
+    status: row.status,
+    submittedAt: row.submitted_at,
+    leaveTypeId: row.leave_type_id ?? undefined,
+    leaveType: row.leave_type_name ?? undefined,
+    startDate: row.start_date ?? undefined,
+    endDate: row.end_date ?? undefined,
+    reason: row.reason ?? undefined,
+    startTime: row.start_time ?? undefined,
+    endTime: row.end_time ?? undefined,
+    location: row.location ?? undefined,
+    purpose: row.purpose ?? undefined,
+    decidedAt: row.decided_at ?? undefined,
+    decisionComment: row.decision_comment ?? undefined,
+  };
+}
+
+export async function loadRequests(): Promise<{
+  requests: RequestRecord[];
+  error: string | null;
+}> {
+  const { data, error } = await supabase
+    .from("requests")
+    .select("id,request_number,employee_id,employee_name,manager_id,manager_name,type,status,submitted_at,leave_type_id,leave_type_name,start_date,end_date,reason,start_time,end_time,location,purpose,decided_at,decision_comment")
+    .order("submitted_at", { ascending: false });
+
+  if (error) return { requests: [], error: error.message };
+  return {
+    requests: ((data ?? []) as RequestRow[]).map(mapRequestRow),
+    error: null,
+  };
+}
+
 export const DEPARTMENTS = [
   "IT",
   "Human Resources",
@@ -55,14 +187,14 @@ export const DEPARTMENTS = [
 export type Department = (typeof DEPARTMENTS)[number];
 
 export const DEFAULT_EMPLOYEES: EmployeeProfile[] = [
-  { id: "EMP-00001", name: "Alex Morgan", firstName: "Alex", lastName: "Morgan", position: "Product Designer", department: "IT", email: "alex.morgan@company.com", phone: "+20 10 0000 0001", status: "ACTIVE", managerId: "EMP-00002", role: "EMPLOYEE", annualLeaveAllocation: 21 },
-  { id: "EMP-00002", name: "Jordan Lee", firstName: "Jordan", lastName: "Lee", position: "Engineering Manager", department: "IT", email: "jordan.lee@company.com", phone: "+20 10 0000 0002", status: "ACTIVE", managerId: null, role: "MANAGER", annualLeaveAllocation: 21 },
-  { id: "EMP-00003", name: "Riley Chen", firstName: "Riley", lastName: "Chen", position: "HR Specialist", department: "Human Resources", email: "riley.chen@company.com", phone: "+20 10 0000 0003", status: "ACTIVE", managerId: null, role: "HR", annualLeaveAllocation: 21 },
-  { id: "EMP-00004", name: "Nour Khalil", firstName: "Nour", lastName: "Khalil", position: "Frontend Developer", department: "IT", email: "nour.khalil@company.com", phone: "+20 10 0000 0004", status: "ACTIVE", managerId: "EMP-00002", role: "EMPLOYEE", annualLeaveAllocation: 21 },
-  { id: "EMP-00005", name: "Sami Hadid", firstName: "Sami", lastName: "Hadid", position: "Backend Developer", department: "IT", email: "sami.hadid@company.com", phone: "+20 10 0000 0005", status: "ACTIVE", managerId: "EMP-00002", role: "EMPLOYEE", annualLeaveAllocation: 21 },
-  { id: "EMP-00006", name: "Sara Mohamed", firstName: "Sara", lastName: "Mohamed", position: "Operations Manager", department: "Operations", email: "sara.mohamed@company.com", phone: "+20 10 0000 0006", status: "ACTIVE", managerId: null, role: "MANAGER", annualLeaveAllocation: 21 },
-  { id: "EMP-00007", name: "Omar Hassan", firstName: "Omar", lastName: "Hassan", position: "Operations Analyst", department: "Operations", email: "omar.hassan@company.com", phone: "+20 10 0000 0007", status: "ACTIVE", managerId: "EMP-00006", role: "EMPLOYEE", annualLeaveAllocation: 21 },
-  { id: "EMP-INACTIVE", name: "Sam Park", firstName: "Sam", lastName: "Park", position: "QA Engineer", department: "IT", email: "sam.park@company.com", status: "INACTIVE", managerId: "EMP-00002", role: "EMPLOYEE", annualLeaveAllocation: 21 },
+  { id: "EMP-00001", employeeNumber: "EMP-00001", name: "Alex Morgan", firstName: "Alex", lastName: "Morgan", position: "Product Designer", department: "IT", email: "alex.morgan@company.com", phone: "+20 10 0000 0001", status: "ACTIVE", managerId: "EMP-00002", role: "EMPLOYEE", annualLeaveAllocation: 21 },
+  { id: "EMP-00002", employeeNumber: "EMP-00002", name: "Jordan Lee", firstName: "Jordan", lastName: "Lee", position: "Engineering Manager", department: "IT", email: "jordan.lee@company.com", phone: "+20 10 0000 0002", status: "ACTIVE", managerId: null, role: "MANAGER", annualLeaveAllocation: 21 },
+  { id: "EMP-00003", employeeNumber: "EMP-00003", name: "Riley Chen", firstName: "Riley", lastName: "Chen", position: "HR Specialist", department: "Human Resources", email: "riley.chen@company.com", phone: "+20 10 0000 0003", status: "ACTIVE", managerId: null, role: "HR", annualLeaveAllocation: 21 },
+  { id: "EMP-00004", employeeNumber: "EMP-00004", name: "Nour Khalil", firstName: "Nour", lastName: "Khalil", position: "Frontend Developer", department: "IT", email: "nour.khalil@company.com", phone: "+20 10 0000 0004", status: "ACTIVE", managerId: "EMP-00002", role: "EMPLOYEE", annualLeaveAllocation: 21 },
+  { id: "EMP-00005", employeeNumber: "EMP-00005", name: "Sami Hadid", firstName: "Sami", lastName: "Hadid", position: "Backend Developer", department: "IT", email: "sami.hadid@company.com", phone: "+20 10 0000 0005", status: "ACTIVE", managerId: "EMP-00002", role: "EMPLOYEE", annualLeaveAllocation: 21 },
+  { id: "EMP-00006", employeeNumber: "EMP-00006", name: "Sara Mohamed", firstName: "Sara", lastName: "Mohamed", position: "Operations Manager", department: "Operations", email: "sara.mohamed@company.com", phone: "+20 10 0000 0006", status: "ACTIVE", managerId: null, role: "MANAGER", annualLeaveAllocation: 21 },
+  { id: "EMP-00007", employeeNumber: "EMP-00007", name: "Omar Hassan", firstName: "Omar", lastName: "Hassan", position: "Operations Analyst", department: "Operations", email: "omar.hassan@company.com", phone: "+20 10 0000 0007", status: "ACTIVE", managerId: "EMP-00006", role: "EMPLOYEE", annualLeaveAllocation: 21 },
+  { id: "EMP-INACTIVE", employeeNumber: "EMP-INACTIVE", name: "Sam Park", firstName: "Sam", lastName: "Park", position: "QA Engineer", department: "IT", email: "sam.park@company.com", status: "INACTIVE", managerId: "EMP-00002", role: "EMPLOYEE", annualLeaveAllocation: 21 },
 ];
 
 // Security: managerId always comes from session, never from client input.
@@ -97,6 +229,7 @@ export interface RequestRecord {
   type: RequestType;
   status: RequestStatus;
   submittedAt: string; // ISO
+  leaveTypeId?: string;
   leaveType?: string;  // stored string (leave type name at time of request)
   startDate?: string;  // YYYY-MM-DD
   endDate?: string;
@@ -117,6 +250,45 @@ export interface NotificationRecord {
   message: string;
   read: boolean;
   createdAt: string;
+}
+
+interface NotificationRow {
+  id: string;
+  user_id: string;
+  type: NotificationRecord["type"];
+  request_id: string;
+  message: string;
+  read: boolean;
+  created_at: string;
+}
+
+function mapNotificationRow(row: NotificationRow): NotificationRecord {
+  return {
+    id: row.id,
+    userId: row.user_id,
+    type: row.type,
+    requestId: row.request_id,
+    message: row.message,
+    read: row.read,
+    createdAt: row.created_at,
+  };
+}
+
+export async function loadNotifications(userId: string): Promise<{
+  notifications: NotificationRecord[];
+  error: string | null;
+}> {
+  const { data, error } = await supabase
+    .from("notifications")
+    .select("id,user_id,type,request_id,message,read,created_at")
+    .eq("user_id", userId)
+    .order("created_at", { ascending: false });
+
+  if (error) return { notifications: [], error: error.message };
+  return {
+    notifications: ((data ?? []) as NotificationRow[]).map(mapNotificationRow),
+    error: null,
+  };
 }
 
 // ─── Store Data ───────────────────────────────────────────────────────────────
